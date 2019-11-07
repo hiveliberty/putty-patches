@@ -1,0 +1,162 @@
+diff --git a/config.c b/config.c
+index db83adb4..5a581f1e 100644
+--- a/config.c
++++ b/config.c
+@@ -1745,8 +1745,9 @@ void setup_config_box(struct controlbox *b, bool midsession,
+                       HELPCTX(keyboard_funkeys),
+                       conf_radiobutton_handler,
+                       I(CONF_funky_type),
+-                      "ESC[n~", I(0), "Linux", I(1), "Xterm R6", I(2),
+-                      "VT400", I(3), "VT100+", I(4), "SCO", I(5), NULL);
++                      "ESC[n~", I(0), "Linux", I(1), "Xterm", I(2),
++                      "Xterm R6", I(3), "VT400", I(4), "VT100+", I(5),
++					  "SCO", I(6), NULL);
+ 
+     s = ctrl_getset(b, "Terminal/Keyboard", "appkeypad",
+                     "Application keypad settings:");
+diff --git a/putty.h b/putty.h
+index 8f9643e5..67f555df 100644
+--- a/putty.h
++++ b/putty.h
+@@ -404,6 +404,7 @@ enum {
+     FUNKY_TILDE,
+     FUNKY_LINUX,
+     FUNKY_XTERM,
++    FUNKY_XTERM_R6,
+     FUNKY_VT400,
+     FUNKY_VT100P,
+     FUNKY_SCO
+@@ -1648,12 +1649,14 @@ void term_keyinputw(Terminal *, const wchar_t * widebuf, int len);
+ typedef enum SmallKeypadKey {
+     SKK_HOME, SKK_END, SKK_INSERT, SKK_DELETE, SKK_PGUP, SKK_PGDN,
+ } SmallKeypadKey;
+-int format_arrow_key(char *buf, Terminal *term, int xkey, bool ctrl);
++int format_arrow_key(char *buf, Terminal *term, int xkey,
++					 bool shift, bool ctrl, bool alt);
+ int format_function_key(char *buf, Terminal *term, int key_number,
+-                        bool shift, bool ctrl);
++                        bool shift, bool ctrl, bool alt);
+ int format_small_keypad_key(char *buf, Terminal *term, SmallKeypadKey key);
+ int format_numeric_keypad_key(char *buf, Terminal *term, char key,
+                               bool shift, bool ctrl);
++int calc_mod_keys(bool shift, bool ctrl, bool alt);
+ 
+ /*
+  * Exports from logging.c.
+diff --git a/terminal.c b/terminal.c
+index 60262d24..2c252531 100644
+--- a/terminal.c
++++ b/terminal.c
+@@ -6778,13 +6778,30 @@ void term_mouse(Terminal *term, Mouse_Button braw, Mouse_Button bcooked,
+     term_update(term);
+ }
+ 
+-int format_arrow_key(char *buf, Terminal *term, int xkey, bool ctrl)
++int calc_mod_keys(bool shift, bool ctrl, bool alt)
+ {
++	if (!(shift || ctrl || alt))
++		return 0;
++	else
++		return 4 * ctrl + 2* alt + shift + 1;
++}
++
++int format_arrow_key(char *buf, Terminal *term, int xkey,
++					 bool shift, bool ctrl, bool alt)
++{
++    int modkeys_state;
+     char *p = buf;
+ 
+     if (term->vt52_mode)
+         p += sprintf(p, "\x1B%c", xkey);
+-    else {
++	else if (term->funky_type == FUNKY_XTERM) {
++		if (alt) *p-- = '\033';
++		modkeys_state = calc_mod_keys(shift, ctrl, alt);
++		if (modkeys_state > 0)
++			p += sprintf(p, "\x1B[1;%d%c", modkeys_state, xkey);
++		else
++			p += sprintf(p, "\x1BO%c", xkey);
++	} else {
+         bool app_flg = (term->app_cursor_keys && !term->no_applic_c);
+ #if 0
+         /*
+@@ -6815,8 +6832,9 @@ int format_arrow_key(char *buf, Terminal *term, int xkey, bool ctrl)
+ }
+ 
+ int format_function_key(char *buf, Terminal *term, int key_number,
+-                        bool shift, bool ctrl)
++                        bool shift, bool ctrl, bool alt)
+ {
++	int code, modkeys_state;
+     char *p = buf;
+ 
+     static const int key_number_to_tilde_code[] = {
+@@ -6829,7 +6847,11 @@ int format_function_key(char *buf, Terminal *term, int key_number,
+     assert(key_number < lenof(key_number_to_tilde_code));
+ 
+     int index = (shift && key_number <= 10) ? key_number + 10 : key_number;
+-    int code = key_number_to_tilde_code[index];
++    if (term->funky_type == FUNKY_XTERM) {
++		code = key_number_to_tilde_code[key_number];
++	} else {
++		code = key_number_to_tilde_code[index];
++	}
+ 
+     if (term->funky_type == FUNKY_SCO) {
+         /* SCO function keys */
+@@ -6840,7 +6862,7 @@ int format_function_key(char *buf, Terminal *term, int key_number,
+         if (ctrl) index += 24;
+         p += sprintf(p, "\x1B[%c", sco_codes[index]);
+     } else if ((term->vt52_mode || term->funky_type == FUNKY_VT100P) &&
+-               code >= 11 && code <= 24) {
++                code >= 11 && code <= 24) {
+         int offt = 0;
+         if (code > 15)
+             offt++;
+@@ -6852,7 +6874,21 @@ int format_function_key(char *buf, Terminal *term, int key_number,
+             p += sprintf(p, "\x1BO%c", code + 'P' - 11 - offt);
+     } else if (term->funky_type == FUNKY_LINUX && code >= 11 && code <= 15) {
+         p += sprintf(p, "\x1B[[%c", code + 'A' - 11);
+-    } else if (term->funky_type == FUNKY_XTERM && code >= 11 && code <= 14) {
++	} else if (term->funky_type == FUNKY_XTERM) {
++		if (alt) *p-- = '\033';
++		modkeys_state = calc_mod_keys(shift, ctrl, alt);
++		if (modkeys_state > 0)
++			if (code >= 11 && code <= 14)
++				p += sprintf(p, "\x1B[1;%d%c", modkeys_state, code + 'P' - 11);
++			else
++				p += sprintf(p, "\x1B[%d;%d~", code, modkeys_state);
++		else
++			if (code >= 11 && code <= 14)
++				p += sprintf(p, "\x1BO%c", code + 'P' - 11);
++			else
++				p += sprintf(p, "\x1B[%d~", code);
++    } else if (term->funky_type == FUNKY_XTERM_R6 && code >= 11 &&
++				code <= 14) {
+         if (term->vt52_mode)
+             p += sprintf(p, "\x1B%c", code + 'P' - 11);
+         else
+diff --git a/windows/window.c b/windows/window.c
+index f9e09aa3..c80d41a5 100644
+--- a/windows/window.c
++++ b/windows/window.c
+@@ -4557,7 +4557,8 @@ static int TranslateKey(UINT message, WPARAM wParam, LPARAM lParam,
+           case VK_F20: fkey_number = 20; goto numbered_function_key;
+           numbered_function_key:
+             p += format_function_key((char *)p, term, fkey_number,
+-                                     shift_state & 1, shift_state & 2);
++                                     shift_state & 1, shift_state & 2,
++									 left_alt);
+             return p - output;
+ 
+             SmallKeypadKey sk_key;
+@@ -4582,7 +4583,8 @@ static int TranslateKey(UINT message, WPARAM wParam, LPARAM lParam,
+           case VK_LEFT: xkey = 'D'; goto arrow_key;
+           case VK_CLEAR: xkey = 'G'; goto arrow_key; /* close enough */
+           arrow_key:
+-            p += format_arrow_key((char *)p, term, xkey, shift_state & 2);
++            p += format_arrow_key((char *)p, term, xkey, shift_state & 1,
++								  shift_state & 2, left_alt);
+             return p - output;
+ 
+           case VK_RETURN:
